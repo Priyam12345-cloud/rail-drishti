@@ -333,6 +333,167 @@ def enrich_routes_fares(rts):
     return rts
 print("[FARE] Engine ready", flush=True)
 
+# ── MUMBAI MULTI-MODAL ROUTING (Pre-computed Graphs) ──
+import bisect as _bisect, pickle as _pkl, heapq
+from difflib import SequenceMatcher as _SeqM
+MM_DIR = "/Workspace/Users/lopamudra.wncc@gmail.com/Multimodel"
+mm_cost_graph = defaultdict(list)
+mm_time_graph = defaultdict(list)
+mm_all_nodes = set()
+_MM_DEPART_IDX = {}
+
+MM_COORDS = {
+    "MUMBAI CST": [18.9398, 72.8355], "MUMBAI C.S.T.": [18.9398, 72.8355], "MUMBAI C.S.T": [18.9398, 72.8355],
+    "DADAR": [19.0178, 72.8478], "DADAR STATION": [19.0178, 72.8478],
+    "KURLA": [19.0726, 72.8794], "KURLA STATION": [19.0726, 72.8794],
+    "THANE": [19.1860, 72.9758], "THANE STATION": [19.1860, 72.9758],
+    "BYCULLA": [18.9785, 72.8318], "BYCULLA STATION (E)": [18.9785, 72.8318],
+    "GHATKOPAR": [19.0866, 72.9081], "GHATKOPAR STATION": [19.0866, 72.9081],
+    "MULUND": [19.1728, 72.9564], "ANDHERI": [19.1197, 72.8464],
+    "BORIVALI": [19.2294, 72.8567], "CHURCHGATE": [18.9322, 72.8264],
+    "BANDRA": [19.0544, 72.8405], "VASHI": [19.0771, 72.9987],
+    "PANVEL": [18.9930, 73.1175], "NERUL": [19.0330, 73.0190],
+    "CHEMBUR": [19.0522, 72.8945], "KANJURMARG": [19.1310, 72.9340],
+    "KANJURMARG STATION (W)": [19.1310, 72.9340], "VIKHROLI": [19.1067, 72.9247],
+    "DOMBIVLI": [19.2183, 73.0867], "KALYAN": [19.2437, 73.1355],
+    "COLABA DEPOT": [18.9067, 72.8147], "WADALA": [19.0176, 72.8674],
+    "SION": [19.0400, 72.8600], "MATUNGA": [19.0270, 72.8555],
+    "PAREL": [18.9936, 72.8378], "LOWER PAREL": [18.9943, 72.8309],
+    "GRANT ROAD": [18.9630, 72.8190], "MARINE LINES": [18.9440, 72.8235],
+    "CHARNI ROAD": [18.9510, 72.8198], "SANTACRUZ": [19.0845, 72.8400],
+    "VILE PARLE": [19.0988, 72.8435], "GOREGAON": [19.1642, 72.8497],
+    "MALAD": [19.1867, 72.8487], "KANDIVALI": [19.2044, 72.8521],
+    "MIRA ROAD": [19.2812, 72.8686], "VASAI ROAD": [19.3657, 72.8310],
+}
+
+_mm_load_error = ""
+_mm_loaded = False
+import gzip as _gzip
+
+def _mm_try_load():
+    global mm_cost_graph, mm_time_graph, mm_all_nodes, _MM_DEPART_IDX, _mm_loaded, _mm_load_error
+    _app_dir = os.path.dirname(os.path.abspath(__file__))
+    # Try gzipped JSON first (most portable), then pickle
+    _paths = [
+        ("json.gz", os.path.join(_app_dir, "mm_graphs.json.gz")),
+        ("json.gz", "/Workspace/Users/lopamudra.wncc@gmail.com/UI/rail-drishti-app/mm_graphs.json.gz"),
+        ("json.gz", f"{MM_DIR}/mm_graphs.json.gz"),
+        ("json.gz", "mm_graphs.json.gz"),
+        ("pkl", os.path.join(_app_dir, "mm_graphs.pkl")),
+        ("pkl", "/Workspace/Users/lopamudra.wncc@gmail.com/UI/rail-drishti-app/mm_graphs.pkl"),
+        ("pkl", f"{MM_DIR}/mm_graphs.pkl"),
+    ]
+    for fmt, pp in _paths:
+        try:
+            if fmt == "json.gz":
+                with _gzip.open(pp, "rt") as f:
+                    d = json.load(f)
+            else:
+                with open(pp, "rb") as f:
+                    d = _pkl.load(f)
+            mm_cost_graph.update(d["cost_graph"])
+            mm_time_graph.update(d["time_graph"])
+            if isinstance(d["all_nodes"], list):
+                mm_all_nodes.update(d["all_nodes"])
+            else:
+                mm_all_nodes.update(d["all_nodes"])
+            _MM_DEPART_IDX.update(d["depart_idx"])
+            _mm_loaded = True
+            print(f"[MM] OK ({fmt}) {pp}: cost={len(mm_cost_graph)} time={len(mm_time_graph)} stops={len(mm_all_nodes)}", flush=True)
+            return
+        except Exception as e:
+            _mm_load_error += f"{pp}: {e}; "
+    print(f"[MM] FAILED all paths: {_mm_load_error}", flush=True)
+
+_mm_try_load()
+
+def _mm_fuzzy(a, b):
+    return _SeqM(None, a.upper(), b.upper()).ratio()
+
+def mm_find_stop(query):
+    q = query.strip().upper()
+    all_n = mm_all_nodes | set(mm_time_graph.keys())
+    if not all_n: return None
+    if q in all_n: return q
+    matches = [n for n in all_n if q in n or n in q]
+    if matches: return min(matches, key=len)
+    best_s, best_m = 0, None
+    for n in all_n:
+        s = _mm_fuzzy(q, n)
+        if s > best_s: best_s, best_m = s, n
+    return best_m if best_s >= 0.55 else None
+
+def mm_dijkstra_cost(src, dst, max_modes=3, k=3):
+    results, seen = [], set()
+    pq = [(0, src, frozenset(), [src], [])]
+    vis = defaultdict(int)
+    while pq and len(results) < k * 5:
+        cost, node, modes, path, mpath = heapq.heappop(pq)
+        if node == dst:
+            combo = frozenset(modes)
+            if combo not in seen:
+                seen.add(combo)
+                results.append({"cost": cost, "path": path, "modes": list(modes), "mpath": mpath})
+                if len(results) >= k: break
+            continue
+        st = (node, modes)
+        vis[st] += 1
+        if vis[st] > 2: continue
+        for nb, ec, m in mm_cost_graph.get(node, []):
+            if m == 'TRANSFER':
+                nm, am = modes, mpath[-1] if mpath else 'WALK'
+            else:
+                nm, am = modes | {m}, m
+            if len(nm) > max_modes: continue
+            heapq.heappush(pq, (cost + ec, nb, nm, path + [nb], mpath + [am]))
+    return sorted(results, key=lambda x: x["cost"])[:k]
+
+def mm_dijkstra_time(src, dst, dep_time="08:00", max_modes=3, k=3):
+    try:
+        dep_h, dep_m = map(int, dep_time.split(':'))
+    except:
+        dep_h, dep_m = 8, 0
+    start_min = dep_h * 60 + dep_m
+    results, seen = [], set()
+    pq = [(start_min, start_min, src, frozenset(), [src], [], 0)]
+    vis = defaultdict(int)
+    iters = 0
+    while pq and len(results) < k * 5 and iters < 300000:
+        iters += 1
+        arr_t, dep_t0, node, modes, path, mpath, waits = heapq.heappop(pq)
+        if node == dst:
+            combo = frozenset(modes)
+            if combo not in seen:
+                seen.add(combo)
+                total = arr_t - start_min
+                results.append({"time_min": total, "arrive_min": arr_t, "depart_min": start_min, "path": path, "modes": list(modes), "mpath": mpath, "wait_min": waits})
+                if len(results) >= k: break
+            continue
+        st = (node, modes)
+        vis[st] += 1
+        if vis[st] > 2: continue
+        edges = mm_time_graph.get(node, [])
+        dep_list = _MM_DEPART_IDX.get(node, [])
+        idx = _bisect.bisect_left(dep_list, arr_t) if dep_list else 0
+        seen_nb = set()
+        for i in range(idx, min(idx + 200, len(edges))):
+            nb, edep, earr, m, sid = edges[i]
+            if m == 'TRANSFER':
+                nm, am = modes, mpath[-1] if mpath else 'WALK'
+                new_arr = arr_t + 3
+                new_wait = waits
+            else:
+                if edep < arr_t: continue
+                nm, am = modes | {m}, m
+                new_arr = earr
+                new_wait = waits + (edep - arr_t)
+            if len(nm) > max_modes: continue
+            nbk = (nb, am)
+            if nbk in seen_nb: continue
+            seen_nb.add(nbk)
+            heapq.heappush(pq, (new_arr, dep_t0, nb, nm, path + [nb], mpath + [am], new_wait))
+    return sorted(results, key=lambda x: x["time_min"])[:k]
+
 # ── HELPERS ──
 def llm_query(prompt, temp=0.5, mx=500):
     if not SDK_OK: return "AI needs serving endpoint. Add in App Settings."
@@ -448,7 +609,7 @@ input:focus,textarea:focus{border-color:#667eea;outline:none;box-shadow:0 0 0 3p
 '''
 
 def page(title, content, active="home"):
-    tabs = [("home","Home"),("chat","AI Assistant"),("routes","Routes"),("delay","Delays"),("ratings","Ratings"),("search","Search")]
+    tabs = [("home","Home"),("chat","AI Assistant"),("routes","Routes"),("multimodal","Mumbai Saathi"),("delay","Delays"),("ratings","Ratings"),("search","Search")]
     nav = ""
     for tid, tlbl in tabs:
         if tid == active:
@@ -726,6 +887,172 @@ async def ratings_submit(tno: str = Form(""), tnm: str = Form(""), rating: str =
         except: rv = 4
         ratings_data.append({"tn":tno,"nm":tnm,"r":rv,"c":comment or "No comment","rv":reviewer or "Anonymous"})
     return await ratings_page()
+
+# ── MULTIMODAL TAB ──
+@app.get("/multimodal", response_class=HTMLResponse)
+async def multimodal_page():
+    c = '<div style="max-width:800px;margin:0 auto">'
+    c += '<div style="background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);border-radius:16px;padding:32px;color:white;margin-bottom:24px;text-align:center">'
+    c += '<h2 style="margin:0;font-size:28px;color:white">Mumbai Local</h2>'
+    c += '<p style="opacity:0.7;margin:4px 0 0">Bus + Central + Western + Harbour + Trans-Harbour</p></div>'
+    c += '<div class="card" style="border-radius:16px;padding:24px;box-shadow:0 4px 20px rgba(0,0,0,0.08)">'
+    c += '<form method="POST" action="/multimodal">'
+    c += '<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">'
+    c += '<div style="width:12px;height:12px;border-radius:50%;background:#4CAF50;flex-shrink:0"></div>'
+    c += '<input type="text" name="origin" placeholder="You are at ? (e.g. Churchgate, Byculla)" style="flex:1;padding:14px;border:1px solid #e0e0e0;border-radius:12px;font-size:16px;outline:none" autofocus></div>'
+    c += '<div style="border-left:2px dashed #ccc;margin-left:5px;height:20px"></div>'
+    c += '<div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">'
+    c += '<div style="width:12px;height:12px;border-radius:2px;background:#E91E63;flex-shrink:0"></div>'
+    c += '<input type="text" name="destination" placeholder="Where to ? location (e.g. Thane, Andheri)" style="flex:1;padding:14px;border:1px solid #e0e0e0;border-radius:12px;font-size:16px;outline:none"></div>'
+    c += '<div style="display:flex;gap:12px;margin-bottom:20px">'
+    c += '<div style="flex:1"><label style="font-size:13px;color:#888">Departure Time</label><input type="time" name="dep_time" value="08:00" style="width:100%;padding:12px;border:1px solid #e0e0e0;border-radius:12px;font-size:15px"></div>'
+    c += '<div style="flex:1"><label style="font-size:13px;color:#888">Max Modes</label><select name="max_modes" style="width:100%;padding:12px;border:1px solid #e0e0e0;border-radius:12px;font-size:15px"><option value="3" selected>3 modes</option><option value="2">2 modes</option><option value="1">1 mode</option></select></div></div>'
+    c += '<button type="submit" style="width:100%;padding:14px;background:linear-gradient(135deg,#667eea,#764ba2);color:white;border:none;border-radius:12px;font-size:17px;font-weight:600;cursor:pointer;letter-spacing:0.5px">Find Routes</button>'
+    c += '</form></div></div>'
+    return page("Mumbai Local", c, "multimodal")
+
+def _mm_format_time(m):
+    if m < 0: m += 1440
+    return f"{m//60:02d}:{m%60:02d}"
+
+def _mm_mode_icon(m):
+    return {"BUS":"\U0001f68d","CENTRAL":"\U0001f682","WESTERN":"\U0001f688","HARBOUR":"\u2693","TRANS_HARBOUR":"\U0001f689","WALK":"\U0001f6b6","TRANSFER":"\U0001f6b6"}.get(m,"\U0001f68d")
+
+def _mm_mode_color(m):
+    return {"BUS":"#2196F3","CENTRAL":"#E53935","WESTERN":"#43A047","HARBOUR":"#FB8C00","TRANS_HARBOUR":"#8E24AA","WALK":"#78909C","TRANSFER":"#78909C"}.get(m,"#888")
+
+def _mm_mode_name(m):
+    return {"BUS":"BEST Bus","CENTRAL":"Central Line","WESTERN":"Western Line","HARBOUR":"Harbour Line","TRANS_HARBOUR":"Trans-Harbour","WALK":"Walk","TRANSFER":"Transfer"}.get(m,m)
+
+def _mm_build_card(route, rank, card_type="cost"):
+    is_best = (rank == 1)
+    if card_type == "cost":
+        headline = f"\u20b9{route['cost']}"
+        subtitle = f"{len(route['path'])} stops \u00b7 {len(route['modes'])} mode{'s' if len(route['modes'])>1 else ''}"
+        accent = "#4CAF50"
+        badge = "CHEAPEST" if is_best else f"#{rank}"
+    else:
+        headline = f"{route['time_min']} min"
+        arrive = _mm_format_time(route['arrive_min'])
+        subtitle = f"Arrive {arrive} \u00b7 {len(route['modes'])} mode{'s' if len(route['modes'])>1 else ''}"
+        accent = "#2196F3"
+        badge = "FASTEST" if is_best else f"#{rank}"
+    badge_bg = accent if is_best else "#888"
+    h = f'<div style="background:white;border-radius:14px;padding:18px;margin-bottom:12px;box-shadow:0 2px 12px rgba(0,0,0,0.06);border:1px solid #f0f0f0;{"border-left:4px solid "+accent if is_best else ""}">'
+    h += f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'
+    h += f'<span style="background:{badge_bg};color:white;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:700;letter-spacing:0.5px">{badge}</span>'
+    h += f'<span style="font-size:24px;font-weight:700;color:#1a1a2e">{headline}</span></div>'
+    h += f'<div style="color:#888;font-size:13px;margin-bottom:12px">{subtitle}</div>'
+    # Steps timeline
+    h += '<div style="padding-left:8px">'
+    path = route["path"]; mpath = route["mpath"]
+    cur_mode = None; seg_start_idx = 0
+    segments = []
+    for i, m in enumerate(mpath):
+        if m != cur_mode:
+            if cur_mode is not None:
+                segments.append((cur_mode, seg_start_idx, i))
+            cur_mode = m; seg_start_idx = i
+    if cur_mode is not None:
+        segments.append((cur_mode, seg_start_idx, len(mpath)))
+    for si, (mode, sidx, eidx) in enumerate(segments):
+        color = _mm_mode_color(mode)
+        icon = _mm_mode_icon(mode)
+        n_stops = eidx - sidx
+        from_s = path[sidx][:25]; to_s = path[eidx][:25]
+        h += f'<div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:{"12px" if si < len(segments)-1 else "0"}">'
+        h += f'<div style="display:flex;flex-direction:column;align-items:center;min-width:24px">'
+        h += f'<div style="width:24px;height:24px;border-radius:50%;background:{color};display:flex;align-items:center;justify-content:center;font-size:12px">{icon}</div>'
+        if si < len(segments) - 1:
+            h += f'<div style="width:2px;height:20px;background:{color};opacity:0.3"></div>'
+        h += '</div>'
+        h += f'<div style="flex:1"><div style="font-weight:600;font-size:14px;color:#333">{_mm_mode_name(mode)}</div>'
+        h += f'<div style="font-size:12px;color:#888">{from_s} \u2192 {to_s} \u00b7 {n_stops} stop{"s" if n_stops>1 else ""}</div></div></div>'
+    h += '</div></div>'
+    return h
+
+def _mm_build_map_js(origin, destination, fastest, cheapest):
+    all_stops = set()
+    for r in fastest + cheapest:
+        all_stops.update(r["path"])
+    markers = []
+    for s in all_stops:
+        su = s.upper()
+        coord = None
+        for k, v in MM_COORDS.items():
+            if k in su or su in k:
+                coord = v; break
+        if coord:
+            markers.append((s[:20], coord[0], coord[1]))
+    oc = MC = None
+    for k, v in MM_COORDS.items():
+        if k.upper() in origin.upper() or origin.upper() in k.upper(): oc = v; break
+    for k, v in MM_COORDS.items():
+        if k.upper() in destination.upper() or destination.upper() in k.upper(): MC = v; break
+    center = oc or MC or [19.0760, 72.8777]
+    js = 'var map=L.map("mmmap").setView([' + str(center[0]) + ',' + str(center[1]) + '],12);'
+    js += "L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'OSM'}).addTo(map);"
+    if oc:
+        js += f"L.marker([{oc[0]},{oc[1]}],{{icon:L.divIcon({{html:'<div style=\"background:#4CAF50;width:14px;height:14px;border-radius:50%;border:3px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3)\"></div>',className:'',iconSize:[20,20],iconAnchor:[10,10]}})}})" + f".addTo(map).bindPopup('<b>You are at?:</b> {html.escape(origin)}');"
+    if MC:
+        js += f"L.marker([{MC[0]},{MC[1]}],{{icon:L.divIcon({{html:'<div style=\"background:#E91E63;width:14px;height:14px;border-radius:2px;border:3px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.3)\"></div>',className:'',iconSize:[20,20],iconAnchor:[10,10]}})}})" + f".addTo(map).bindPopup('<b>Where to ?:</b> {html.escape(destination)}');"
+    if oc and MC:
+        js += f"map.fitBounds([[{oc[0]},{oc[1]}],[{MC[0]},{MC[1]}]],{{padding:[50,50]}});"
+    for name, lat, lng in markers:
+        if (oc and lat == oc[0] and lng == oc[1]) or (MC and lat == MC[0] and lng == MC[1]): continue
+        js += f"L.circleMarker([{lat},{lng}],{{radius:4,fillColor:'#667eea',color:'white',weight:1,fillOpacity:0.8}}).addTo(map).bindTooltip('{html.escape(name)}');"
+    return js
+
+@app.post("/multimodal", response_class=HTMLResponse)
+async def multimodal_search(origin: str = Form(""), destination: str = Form(""), dep_time: str = Form("08:00"), max_modes: int = Form(3)):
+    if not origin or not destination:
+        return page("Mumbai Local", '<div class="card">Enter both origin and destination.</div>', "multimodal")
+    src = mm_find_stop(origin); dst = mm_find_stop(destination)
+    if not src:
+        return page("Mumbai Local", f'<div class="card"><b>Could not find stop:</b> {html.escape(origin)}<br><small style="color:#888">Graph loaded: {len(mm_all_nodes)} nodes | Error: {_mm_load_error}</small></div>', "multimodal")
+    if not dst:
+        return page("Mumbai Local", f'<div class="card"><b>Could not find stop:</b> {html.escape(destination)}<br><small style="color:#888">Graph loaded: {len(mm_all_nodes)} nodes | Error: {_mm_load_error}</small></div>', "multimodal")
+    cheapest = mm_dijkstra_cost(src, dst, max_modes, 3)
+    fastest = mm_dijkstra_time(src, dst, dep_time, max_modes, 3)
+    c = '<div style="max-width:800px;margin:0 auto">'
+    # Header
+    c += '<div style="background:linear-gradient(135deg,#0f0c29,#302b63,#24243e);border-radius:16px;padding:24px;color:white;margin-bottom:20px">'
+    c += f'<div style="display:flex;align-items:center;gap:12px;margin-bottom:8px"><div style="width:10px;height:10px;border-radius:50%;background:#4CAF50"></div><span style="font-size:18px">{html.escape(src)}</span></div>'
+    c += f'<div style="border-left:2px dashed rgba(255,255,255,0.3);margin-left:4px;height:12px"></div>'
+    c += f'<div style="display:flex;align-items:center;gap:12px"><div style="width:10px;height:10px;border-radius:2px;background:#E91E63"></div><span style="font-size:18px">{html.escape(dst)}</span></div>'
+    c += f'<div style="margin-top:12px;opacity:0.6;font-size:13px">\U0001f552 Depart {dep_time} \u00b7 Max {max_modes} modes \u00b7 {len(mm_cost_graph)} stops in network</div></div>'
+    # Map
+    c += '<div style="border-radius:14px;overflow:hidden;margin-bottom:20px;box-shadow:0 2px 12px rgba(0,0,0,0.1)">'
+    c += '<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>'
+    c += '<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>'
+    c += '<div id="mmmap" style="height:280px;width:100%"></div>'
+    c += '<script>document.addEventListener("DOMContentLoaded",function(){' + _mm_build_map_js(origin, destination, fastest, cheapest) + '});</script></div>'
+    # Two-column layout
+    c += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">'
+    # Fastest column
+    c += '<div>'
+    c += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><span style="font-size:20px">\u26a1</span><span style="font-size:18px;font-weight:700;color:#2196F3">Fastest</span></div>'
+    if fastest:
+        for i, r in enumerate(fastest, 1):
+            c += _mm_build_card(r, i, "time")
+    else:
+        c += '<div style="text-align:center;padding:30px;color:#aaa;background:#fafafa;border-radius:14px">No time-optimal routes found</div>'
+    c += '</div>'
+    # Cheapest column
+    c += '<div>'
+    c += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><span style="font-size:20px">\U0001f4b0</span><span style="font-size:18px;font-weight:700;color:#4CAF50">Cheapest</span></div>'
+    if cheapest:
+        for i, r in enumerate(cheapest, 1):
+            c += _mm_build_card(r, i, "cost")
+    else:
+        c += '<div style="text-align:center;padding:30px;color:#aaa;background:#fafafa;border-radius:14px">No cost-optimal routes found</div>'
+    c += '</div></div>'
+    # Search again
+    c += '<div style="text-align:center;margin-top:20px"><a href="/multimodal" style="color:#667eea;text-decoration:none;font-weight:600">\u2190 Search again</a></div>'
+    c += '</div>'
+    return page("Mumbai Local", c, "multimodal")
+
+
 
 @app.get("/search", response_class=HTMLResponse)
 async def search_page():
