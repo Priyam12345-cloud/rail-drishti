@@ -126,6 +126,8 @@ Upload train_delay/ folder to:
 # 1. Navigate to UI/rail-drishti-app/
 # 2. Deploy via Databricks Apps
 # 3. The app serves at your workspace URL
+here is the deployable link
+https://rail-drishti-7474650771899073.aws.databricksapps.com/
 ```
 
 ---
