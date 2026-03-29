@@ -1,0 +1,15 @@
+# Data files (too large for GitHub)
+data/
+*.csv
+*.json
+!app/delay_stats.json
+!app/app.yaml
+!app/requirements.txt
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Databricks
+.databricks/
