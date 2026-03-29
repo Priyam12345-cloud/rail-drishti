@@ -192,3 +192,94 @@ Rail Drishti is an AI-powered Indian Railways intelligence platform on Databrick
 ## Team
 
 Built for the Databricks Hackathon 2026.
+
+---
+
+## Bonus: Quantitative Metrics & MLflow Logs
+
+### 1. MLflow Experiment Logs
+
+**3 Experiments tracked, 7 runs total:**
+
+#### Experiment: Train Delay Prediction (LightGBM)
+| Run | Test MAE | Test RMSE | Test R² | Status |
+|-----|----------|-----------|---------|--------|
+| Best (tuned) | **19.06 min** | 38.86 min | **0.783** | FINISHED |
+| Hypertuned v2 | 18.75 min | 32.36 min | 0.779 | FINISHED |
+| Baseline | 26.21 min | 50.86 min | 0.453 | FINISHED |
+
+**Best Model Hyperparameters (MLflow-tracked):**
+- Algorithm: LightGBM (boosting_type=gbdt)
+- learning_rate: 0.230, n_estimators: 700, max_depth: 9
+- num_leaves: 149, min_child_samples: 18
+- Regularization: reg_alpha=0.060, reg_lambda=0.061
+- Feature sampling: colsample_bytree=0.955, subsample=0.687
+- Model URI: `runs:/d9ba760cbb1f42f697214e19ba2095c9/model`
+
+#### Experiment: Mumbai Multi-Modal Route Optimizer
+| Run | Origin | Destination | Routes Found | Best Time | Stops |
+|-----|--------|-------------|--------------|-----------|-------|
+| 1 | Mumbai CST | Thane (East) | 1 | 45 min | 17 |
+| 2 | Mumbai CST | Thane (East) | 3 | 63 min | 27 |
+
+---
+
+### 2. Routing Engine Accuracy Metrics
+
+| Metric | Value |
+|--------|-------|
+| Schedule entries processed | 417,080 |
+| Stations indexed | 8,533 |
+| Graph edges built | 1,235,521 |
+| Hub stations (10+ trains) | 6,470 |
+| Trains with stop-lists | 5,208 |
+| City clusters defined | 15 cities, 45+ codes |
+| Direct train recall (PNBE→Mumbai) | 10/10 (was 0 without clusters) |
+| Via-hub routes (PNBE→Mumbai) | 179 connecting options |
+| Fare calculation coverage | 6 classes (GEN/SL/CC/3AC/2AC/1AC) |
+| Distance method | Hop-by-hop haversine × 1.2 rail factor |
+
+---
+
+### 3. Delay Prediction Model Performance
+
+**Dataset:** 500K+ records, 98 trains, 382 stations
+
+| Metric | Baseline | Tuned Model | Improvement |
+|--------|----------|-------------|-------------|
+| MAE | 26.21 min | 19.06 min | 27% better |
+| RMSE | 50.86 min | 38.86 min | 24% better |
+| R² Score | 0.453 | 0.783 | +73% |
+
+**Features used:** train_no, station (encoded), day_of_week, month, is_holiday
+
+---
+
+### 4. Multilingual Chatbot Evaluation
+
+The chatbot uses `databricks-meta-llama-3-3-70b-instruct` via Databricks Model Serving.
+
+**Languages tested:**
+
+| Language | Sample Query | Response Quality | Correct Routing |
+|----------|-------------|------------------|-----------------|
+| English | "Delhi to Mumbai trains" | Fluent, detailed | Yes |
+| Hindi | "ट्रेन में बाथरूम कहाँ है?" | Fluent Hindi reply | N/A (FAQ) |
+| Tamil | "விபத்து எப்படி நடக்கும்?" | Tamil response | N/A (FAQ) |
+| Spanish | "¿Dónde está el baño?" | Spanish response | N/A (FAQ) |
+| Bengali | "ট্রেন কখন আসবে?" | Bengali response | Yes |
+| Marathi | "मुंबई ते पुणे ट्रेन" | Marathi response | Yes |
+
+**PDF Knowledge Base:** 6 documents, 815+ pages (SCR G&SR, Tatkal FAQ, Citizen Charter, e-Ticket FAQ, Internet Tickets guide, General Rules 2015)
+
+---
+
+### 5. AI Model Performance
+
+| AI Function | Model | Latency | Accuracy |
+|-------------|-------|---------|----------|
+| NLP Query Parsing | Llama 3.3 70B | ~2s | Correctly extracts origin/dest/time from natural language |
+| Route Recommendation | Llama 3.3 70B | ~3s | Considers delay risk, connection safety, cost trade-offs |
+| Waitlist Prediction | Llama 3.3 70B | ~2s | Probabilistic assessment based on train type, class, days |
+| Delay Prediction | LightGBM (MLflow) | <100ms | R²=0.783, MAE=19 min across 98 trains |
+| PDF Q&A | Llama 3.3 70B | ~2s | Searches 815+ pages, cites source document |
